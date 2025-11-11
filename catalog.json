@@ -1,0 +1,62 @@
+[
+  {
+    "id": 1001,
+    "name": "Winrun Axis (кеды)",
+    "description": "Лёгкие кеды на каждый день",
+    "price": 8990,
+    "variants": [
+      {"color": "белый/чёрный", "image": "axis1.jpg"},
+      {"color": "хаки/бежевый", "image": "axis2.jpg"},
+      {"color": "серый/белый", "image": "axis3.jpg"},
+      {"color": "чёрный/белый", "image": "axis4.jpg"}
+    ]
+  },
+  {
+    "id": 1002,
+    "name": "Winrun Urban Classic (кеды)",
+    "description": "Классика на каждый день",
+    "price": 8990,
+    "variants": [
+      {"color": "бежевый/зелёный", "image": "urban1.jpg"},
+      {"color": "чёрный",          "image": "urban2.jpg"},
+      {"color": "белый",           "image": "urban3.jpg"},
+      {"color": "серый/белый",     "image": "urban4.jpg"}
+    ]
+  },
+  {
+    "id": 1003,
+    "name": "WINRUN Flow",
+    "description": "Динамичный силуэт",
+    "price": 8990,
+    "variants": [
+      {"color": "светло-бежевый/зелёный", "image": "flow1.jpg"},
+      {"color": "оранжевый-чёрный",       "image": "flow2.jpg"},
+      {"color": "чёрный-серый",           "image": "flow3.jpg"},
+      {"color": "белый",                  "image": "flow4.jpg"}
+    ]
+  },
+  {
+    "id": 1004,
+    "name": "Winrun Rise",
+    "description": "Премиальная отделка",
+    "price": 8990,
+    "variants": [
+      {"color": "коричневый+бежевый+светло-бежевый", "image": "rise1.jpg"},
+      {"color": "чёрный+серый",                      "image": "rise2.jpg"},
+      {"color": "светло-коричневый/светло-серый",    "image": "rise3.jpg"},
+      {"color": "белый+светло-серый",                "image": "rise4.jpg"}
+    ]
+  },
+  {
+    "id": 1005,
+    "name": "Winrun Shift",
+    "description": "Комфорт и поддержка",
+    "price": 8990,
+    "variants": [
+      {"color": "светло-коричневый/светло-бежевый+молочный", "image": "shift1.jpg"},
+      {"color": "светло-бежевый+бордо",                      "image": "shift2.jpg"},
+      {"color": "белый",                                     "image": "shift3.jpg"},
+      {"color": "чёрный",                                    "image": "shift4.jpg"}
+    ]
+  }
+]
