@@ -112,12 +112,10 @@ public class WinrunBot extends TelegramLongPollingBot {
         // Пытаемся отправить 1.jpg как фото с подписью
         File f = resolveLocalFile("1.jpg");
         if (f.exists() && f.isFile()) {
-            ReplyKeyboardMarkup k = (ReplyKeyboardMarkup) mainMenu();
             SendPhoto sp = new SendPhoto(String.valueOf(chatId), new InputFile(f, f.getName()));
             sp.setCaption(caption);
             sp.setParseMode(ParseMode.MARKDOWN);
             sp.setReplyMarkup(startInlineKb());
-            sp.setReplyMarkup(k);
             execute(sp);
         } else {
             // fallback — если файла нет, отправим просто текст
@@ -126,6 +124,9 @@ public class WinrunBot extends TelegramLongPollingBot {
             sm.setReplyMarkup(startInlineKb());
             execute(sm);
         }
+
+        ReplyKeyboardMarkup k = (ReplyKeyboardMarkup) mainMenu();
+
     }
 
     /* ===================== Каталог: список моделей ===================== */
@@ -578,7 +579,7 @@ public class WinrunBot extends TelegramLongPollingBot {
 
                 states.put(chatId, ConversationState.REVIEW);
             }
-            default -> sendStartHero(chatId);
+            default -> sendMainMenu(chatId);
         }
     }
 
@@ -684,5 +685,17 @@ public class WinrunBot extends TelegramLongPollingBot {
         rows.add(row1); rows.add(row2); rows.add(row3);
         k.setKeyboard(rows);
         return k;
+    }
+
+    private void sendMainMenu(long chatId) throws TelegramApiException {
+        ReplyKeyboardMarkup k = (ReplyKeyboardMarkup) mainMenu();
+        SendMessage sm = new SendMessage(String.valueOf(chatId), "Добро пожаловать в Winrun! Выберите раздел:");
+        sm.setReplyMarkup(k);
+        execute(sm);
+
+        states.put(chatId, ConversationState.IDLE);
+        sessions.put(chatId, new Session());
+
+        // ничего не удаляем (по твоему требованию)
     }
 }
