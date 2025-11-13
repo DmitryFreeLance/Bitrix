@@ -27,7 +27,7 @@ public class Config {
        Базовый путь к локальным картинкам (по умолчанию — текущая рабочая директория).
        Если variant.image = "axis1.jpg", итоговый путь будет IMAGES_BASE_PATH/axis1.jpg
     */
-    public String imagesBasePath()    { return env.get("IMAGES_BASE_PATH", "."); }
+    public String imagesBasePath()    { return env.get("IMAGES_BASE_PATH", "/app/images"); }
 
     /* === Совместимость (если где-то в коде ещё используется) === */
     public String bitrixProductXmlId(){ return env.get("BITRIX_PRODUCT_XML_ID", "212"); }

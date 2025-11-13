@@ -1,17 +1,20 @@
-# Build stage
-FROM maven:3.9-eclipse-temurin-21 AS build
-WORKDIR /src
+# ---------- build stage ----------
+FROM maven:3.9-eclipse-temurin-17 AS build
+WORKDIR /app
 COPY pom.xml .
-RUN mvn -q -e -DskipTests dependency:go-offline
+RUN mvn -q -DskipTests dependency:go-offline
 COPY src ./src
 RUN mvn -q -DskipTests package
 
-# Runtime
-FROM eclipse-temurin:21-jre
+# ---------- run stage ----------
+FROM eclipse-temurin:17-jre
 WORKDIR /app
-ENV JAVA_OPTS=""
-COPY --from=build /src/target/winrun-bot.jar /app/winrun-bot.jar
-COPY .env.example /app/.env
-VOLUME ["/app/data"]
+
+# app
+COPY --from=build /app/target/*.jar /app/app.jar
+
+COPY 1.jpg 1.docx /app/
+COPY images/ /app/images/
+
 EXPOSE 8080
-CMD ["sh", "-lc", "java $JAVA_OPTS -jar /app/winrun-bot.jar"]
+CMD ["java","-jar","/app/app.jar"]

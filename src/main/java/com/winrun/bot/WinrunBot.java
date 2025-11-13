@@ -8,6 +8,7 @@ import com.winrun.repo.OrderRepo;
 import com.winrun.repo.ProductRepo;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.ParseMode;
+import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMediaGroup;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
@@ -38,7 +39,7 @@ public class WinrunBot extends TelegramLongPollingBot {
     private final Map<Long, ConversationState> states = new ConcurrentHashMap<>();
     private final Map<Long, Session> sessions = new ConcurrentHashMap<>();
 
-    // Сообщения альбома и карточки — чтобы удалять при смене цвета
+    // Сообщения альбома и карточки — чтобы удалять при желании (по твоему последнему требованию мы НЕ удаляем при навигации)
     private final Map<Long, List<Integer>> lastAlbumMessageIds = new ConcurrentHashMap<>();
     private final Map<Long, Integer> lastCardMessageId = new ConcurrentHashMap<>();
 
@@ -76,7 +77,7 @@ public class WinrunBot extends TelegramLongPollingBot {
         if (!m.hasText()) return;
 
         String text = m.getText().trim();
-        if ("/start".equals(text)) { sendMainMenu(chatId); return; }
+        if ("/start".equals(text)) { sendStartHero(chatId); return; }
 
         switch (text) {
             case "👟 Каталог" -> showModelsList(chatId);
@@ -90,6 +91,44 @@ public class WinrunBot extends TelegramLongPollingBot {
             case "💬 Поддержка" -> sendText(chatId, "Напишите оператору: " + cfg.supportUsername());
             default -> proceedFlow(chatId, text);
         }
+    }
+
+    /* ===================== /start: фото + подпись + инлайн-кнопки ===================== */
+
+    private InlineKeyboardMarkup startInlineKb() {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+        rows.add(List.of(button("📄 Юр. информация", "legal")));
+        rows.add(List.of(button("🚚 Способы доставки", "delivery")));
+        rows.add(List.of(button("📜 Оферта", "offer")));
+        rows.add(List.of(button("🏠 В меню", "goMenu")));
+        return inline(rows);
+    }
+
+    private void sendStartHero(long chatId) throws TelegramApiException {
+        String caption = """
+                👋 Привет!
+                Добро пожаловать в WINRUN Casual Man’s — первый в России casual-бренд для мужчин.
+                Мы создаём обувь, которая сочетает премиальный дизайн, комфорт и доступную цену
+                """;
+
+        // Пытаемся отправить 1.jpg как фото с подписью
+        File f = resolveLocalFile("1.jpg");
+        if (f.exists() && f.isFile()) {
+            SendPhoto sp = new SendPhoto(String.valueOf(chatId), new InputFile(f, f.getName()));
+            sp.setCaption(caption);
+            sp.setParseMode(ParseMode.MARKDOWN);
+            sp.setReplyMarkup(startInlineKb());
+            execute(sp);
+        } else {
+            // fallback — если файла нет, отправим просто текст
+            SendMessage sm = new SendMessage(String.valueOf(chatId), caption + "\n(Нет файла 1.jpg)");
+            sm.setParseMode(ParseMode.MARKDOWN);
+            sm.setReplyMarkup(startInlineKb());
+            execute(sm);
+        }
+
+        // Параллельно можно (по желанию) показать нижнее главное меню-клавиатуру
+        // sendMainMenu(chatId); // если хочешь оставить только инлайн — закомментировано
     }
 
     /* ===================== Каталог: список моделей ===================== */
@@ -121,6 +160,7 @@ public class WinrunBot extends TelegramLongPollingBot {
         sm.setReplyMarkup(inline(rows));
         execute(sm);
 
+        // ничего не чистим — по твоему требованию
         states.put(chatId, ConversationState.SELECT_PRODUCT);
     }
 
@@ -145,7 +185,7 @@ public class WinrunBot extends TelegramLongPollingBot {
         return f;
     }
 
-    /** Новый порядок: base.jpg, base_4.jpg, base_3.jpg, base_5.jpg, base_2.jpg */
+    /** Новый порядок: 1, 4, 3, 5, 2 */
     private List<String> buildStrictRefs(String mainFilename) {
         List<String> out = new ArrayList<>();
         if (mainFilename == null || mainFilename.isBlank()) return out;
@@ -155,12 +195,11 @@ public class WinrunBot extends TelegramLongPollingBot {
         String base = dot > 0 ? name.substring(0, dot) : name;
         String ext  = dot > 0 ? name.substring(dot) : "";
 
-        // порядок для всех моделей/вариантов: 1, 4, 3, 5, 2
-        out.add(base + ext);          // 1: base.jpg (например flow1.jpg)
-        out.add(base + "_4" + ext);   // 2
+        out.add(base + ext);          // 1
+        out.add(base + "_4" + ext);   // 4
         out.add(base + "_3" + ext);   // 3
-        out.add(base + "_5" + ext);   // 4
-        out.add(base + "_2" + ext);   // 5
+        out.add(base + "_5" + ext);   // 5
+        out.add(base + "_2" + ext);   // 2
         return out;
     }
 
@@ -171,7 +210,7 @@ public class WinrunBot extends TelegramLongPollingBot {
                 "Цена: " + (p.price > 0 ? p.price : cfg.priceRub()) + " ₽";
     }
 
-    /** Загрузить фото (если локальное) и закэшировать file_id. Вернёт список file_id по refs (только найденные). */
+    /** прогрев file_id (в том же чате; можно переделать на кэш-чат, если понадобится) */
     private List<String> ensureFileIds(long chatId, List<String> refs) throws TelegramApiException {
         List<String> out = new ArrayList<>();
         for (String ref : refs) {
@@ -179,12 +218,8 @@ public class WinrunBot extends TelegramLongPollingBot {
 
             String key = canonicalRef(ref);
             String cached = fileIdCache.get(key);
-            if (cached != null && !cached.isBlank()) {
-                out.add(cached);
-                continue;
-            }
+            if (cached != null && !cached.isBlank()) { out.add(cached); continue; }
 
-            // Если это URL, можно сразу использовать его как media, НО для единообразия и надёжности тоже прогрузим в file_id.
             InputFile toSend;
             if (isHttpUrl(ref)) {
                 toSend = new InputFile(ref);
@@ -197,7 +232,6 @@ public class WinrunBot extends TelegramLongPollingBot {
                 toSend = new InputFile(f, f.getName());
             }
 
-            // Временная отправка, чтобы получить file_id
             SendPhoto sp = new SendPhoto(String.valueOf(chatId), toSend);
             Message msg = execute(sp);
             String fid = extractLargestPhotoFileId(msg);
@@ -206,8 +240,7 @@ public class WinrunBot extends TelegramLongPollingBot {
                 out.add(fid);
             }
 
-            // Удалим временный месседж
-            try { execute(new DeleteMessage(String.valueOf(chatId), msg.getMessageId())); } catch (Exception ignore) {}
+            execute(new DeleteMessage(String.valueOf(chatId), msg.getMessageId()));
         }
         return out;
     }
@@ -216,7 +249,6 @@ public class WinrunBot extends TelegramLongPollingBot {
         if (ref == null) return "";
         String r = ref.trim();
         if (isHttpUrl(r)) return r;
-        // для локальных — абсолютный путь как ключ
         File f = resolveLocalFile(r);
         return f.getAbsolutePath();
     }
@@ -236,25 +268,16 @@ public class WinrunBot extends TelegramLongPollingBot {
 
     private InlineKeyboardMarkup controlKb() {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-
-        // навигация по цветам
         rows.add(List.of(
                 button("◀", "vprev"),
-                button("🔁 Цвета", "noop"),
+                button("🔁 Цвет", "noop"),
                 button("▶", "vnext")
         ));
-
-        // действие: выбрать текущую
+        rows.add(List.of(button("Выбрать ✅", "pickModel")));
         rows.add(List.of(
-                button("Выбрать ✅", "pickModel")
+                button("🔁 Модель", "chooseModel"),
+                button("🏠 В меню", "goMenu")
         ));
-
-        // новые кнопки
-        rows.add(List.of(
-                button("🔁 Модели", "chooseModel"),
-                button("🏠 Меню", "goMenu")
-        ));
-
         return inline(rows);
     }
 
@@ -281,17 +304,17 @@ public class WinrunBot extends TelegramLongPollingBot {
         if (idx < 0 || idx >= p.variants.size()) idx = 0;
         Product.Variant v = p.variants.get(idx);
 
-        // Имена файлов по схеме base.jpg, base_2.jpg ... base_5.jpg
+        // Файлы по схеме и нашем порядке
         List<String> refs = buildStrictRefs(v.image);
 
-        // Гарантируем file_id для каждого доступного изображения
+        // Прогреваем и получаем file_id
         List<String> fids = ensureFileIds(chatId, refs);
 
-        // Формируем альбом из file_id (строки). Telegram требует >= 2 для SendMediaGroup
+        // Собираем альбом из file_id
         List<InputMedia> media = new ArrayList<>();
         for (String fid : fids) {
             InputMediaPhoto photo = new InputMediaPhoto();
-            photo.setMedia(fid); // <-- ВАЖНО: строка (file_id)
+            photo.setMedia(fid); // строка (file_id)
             media.add(photo);
             if (media.size() == 5) break;
         }
@@ -305,12 +328,11 @@ public class WinrunBot extends TelegramLongPollingBot {
             List<Message> responses = execute(group);
             for (Message mm : responses) mids.add(mm.getMessageId());
         } else if (media.size() == 1) {
-            // fallback: одно фото отдельно
             SendPhoto sp = new SendPhoto(String.valueOf(chatId), new InputFile(fids.get(0)));
             Message m = execute(sp);
             mids.add(m.getMessageId());
         } else {
-            // нет валидных изображений
+            // нет валидных изображений — пропускаем альбом
         }
 
         lastAlbumMessageIds.put(chatId, mids);
@@ -332,12 +354,67 @@ public class WinrunBot extends TelegramLongPollingBot {
 
         if ("noop".equals(data)) return;
 
-        if ("chooseModel".equals(data)) {
-            showModelsList(chatId);
+        if ("legal".equals(data)) {
+            String legal = """
+                    winrun.official@gmail
+                    WhatsApp: 89122001117
+
+                    Название организации
+                    ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ВН-РН ГРУПП"
+
+                    Юридический адрес организации
+                    420140, РОССИЯ, РЕСПУБЛИКА ТАТАРСТАН (ТАТАРСТАН), Г.О. ГОРОД КАЗАНЬ, Г КАЗАНЬ, УЛ МИНСКАЯ, Д. 61, ПОМЕЩ. 1048
+
+                    ИНН
+                    1686052040
+
+                    КПП
+                    168601001
+
+                    ОГРН/ОГРНИП
+                    1251600037039
+
+                    Расчетный счет
+                    40702810010001969262
+
+                    Банк
+                    АО «ТБанк»
+
+                    ИНН банка
+                    7710140679
+
+                    БИК банка
+                    044525974
+
+                    Корреспондентский счет банка
+                    30101810145250000974
+
+                    Юридический адрес банка
+                    127287, г. Москва, ул. Хуторская 2-я, д. 38А, стр. 26
+                    """;
+            sendText(chatId, legal);
+            return;
+        }
+
+        if ("delivery".equals(data)) {
+            sendText(chatId, "Способы доставки: СДЭК и Яндекс.Доставка.");
+            return;
+        }
+
+        if ("offer".equals(data)) {
+            File f = resolveLocalFile("1.docx");
+            if (f.exists() && f.isFile()) {
+                SendDocument sd = new SendDocument(String.valueOf(chatId), new InputFile(f, f.getName()));
+                sd.setCaption("Публичная оферта");
+                execute(sd);
+            } else {
+                sendText(chatId, "Файл оферты (1.docx) не найден рядом с приложением.");
+            }
             return;
         }
 
         if ("goMenu".equals(data)) {
+            // Возврат в меню (ничего не удаляем — по твоему требованию)
             sendMainMenu(chatId);
             return;
         }
@@ -348,6 +425,7 @@ public class WinrunBot extends TelegramLongPollingBot {
             s.selectedModelId = id;
             s.variantIndex = 0;
 
+            // ничего не удаляем
             sendVariantAlbumThenCard(chatId);
             return;
         }
@@ -365,6 +443,7 @@ public class WinrunBot extends TelegramLongPollingBot {
             if ("vnext".equals(data)) idx = (idx + 1) % n; else idx = (idx - 1 + n) % n;
             s.variantIndex = idx;
 
+            // ничего не удаляем — просто шлём новую группу
             sendVariantAlbumThenCard(chatId);
             return;
         }
@@ -620,5 +699,7 @@ public class WinrunBot extends TelegramLongPollingBot {
 
         states.put(chatId, ConversationState.IDLE);
         sessions.put(chatId, new Session());
+
+        // ничего не удаляем (по твоему требованию)
     }
 }
