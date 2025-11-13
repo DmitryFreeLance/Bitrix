@@ -126,7 +126,7 @@ public class WinrunBot extends TelegramLongPollingBot {
         }
 
         // Параллельно можно (по желанию) показать нижнее главное меню-клавиатуру
-        // sendMainMenu(chatId); // если хочешь оставить только инлайн — закомментировано
+        sendMainMenu(chatId); // если хочешь оставить только инлайн — закомментировано
     }
 
     /* ===================== Каталог: список моделей ===================== */
@@ -407,10 +407,14 @@ public class WinrunBot extends TelegramLongPollingBot {
         }
 
         if ("goMenu".equals(data)) {
-            sendMainMenu(chatId);
+            sendStartHero(chatId);
             return;
         }
-
+        if ("chooseModel".equals(data)) {
+            // Кнопка "🔁 Модель" — вернём пользователя к каталогу/выбору модели
+            showModelsList(chatId);
+            return;
+        }
         if (data.startsWith("model:")) {
             int id = Integer.parseInt(data.substring(6));
             Session s = sessions.computeIfAbsent(chatId, k -> new Session());
