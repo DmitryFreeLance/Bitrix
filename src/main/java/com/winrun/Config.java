@@ -41,5 +41,5 @@ public class Config {
 
     /* === Misc === */
     public String paymentDescription() { return env.get("PAYMENT_DESCRIPTION", "Winrun preorder (доставка включена)"); }
-    public String supportUsername()    { return env.get("SUPPORT_USERNAME", "@username"); }
+    public String supportUsername()    { return env.get("SUPPORT_USERNAME", "@winrun_support"); }
 }

@@ -8,17 +8,12 @@ import com.winrun.repo.OrderRepo;
 import com.winrun.repo.ProductRepo;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.ParseMode;
+import org.telegram.telegrambots.meta.api.methods.send.SendMediaGroup;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
 import org.telegram.telegrambots.meta.api.methods.updatingmessages.DeleteMessage;
-import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageCaption;
-import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageMedia;
-import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
-import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
-import org.telegram.telegrambots.meta.api.objects.InputFile;
-import org.telegram.telegrambots.meta.api.objects.Message;
-import org.telegram.telegrambots.meta.api.objects.PhotoSize;
-import org.telegram.telegrambots.meta.api.objects.Update;
+import org.telegram.telegrambots.meta.api.objects.*;
+import org.telegram.telegrambots.meta.api.objects.media.InputMedia;
 import org.telegram.telegrambots.meta.api.objects.media.InputMediaPhoto;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboard;
@@ -43,8 +38,12 @@ public class WinrunBot extends TelegramLongPollingBot {
     private final Map<Long, ConversationState> states = new ConcurrentHashMap<>();
     private final Map<Long, Session> sessions = new ConcurrentHashMap<>();
 
-    // Кэш известных file_id: productId -> (variantIndex -> fileId)
-    private final Map<Integer, Map<Integer, String>> photoFileIdCache = new ConcurrentHashMap<>();
+    // Сообщения альбома и карточки — чтобы удалять при смене цвета
+    private final Map<Long, List<Integer>> lastAlbumMessageIds = new ConcurrentHashMap<>();
+    private final Map<Long, Integer> lastCardMessageId = new ConcurrentHashMap<>();
+
+    // Кэш file_id: ключ = canonicalRef (путь/URL), значение = file_id
+    private final Map<String, String> fileIdCache = new ConcurrentHashMap<>();
 
     private static final Pattern PHONE_RU = Pattern.compile("^(\\+7|8)\\d{10}$");
 
@@ -56,8 +55,9 @@ public class WinrunBot extends TelegramLongPollingBot {
         this.bitrix = bitrix;
         this.rk = rk;
 
-        try { this.products.seedIfEmpty(); }
-        catch (Exception e) { System.out.println("Seed catalog failed: " + e.getMessage()); }
+        try { this.products.seedIfEmpty(); } catch (Exception e) {
+            System.out.println("Seed catalog failed: " + e.getMessage());
+        }
     }
 
     @Override public String getBotUsername() { return cfg.botUsername(); }
@@ -73,10 +73,9 @@ public class WinrunBot extends TelegramLongPollingBot {
     private void onMessage(Message m) throws Exception {
         long chatId = m.getChatId();
         states.putIfAbsent(chatId, ConversationState.IDLE);
-
         if (!m.hasText()) return;
-        String text = m.getText().trim();
 
+        String text = m.getText().trim();
         if ("/start".equals(text)) { sendMainMenu(chatId); return; }
 
         switch (text) {
@@ -93,14 +92,14 @@ public class WinrunBot extends TelegramLongPollingBot {
         }
     }
 
-    /* ==================== КАТАЛОГ: СПИСОК МОДЕЛЕЙ ==================== */
+    /* ===================== Каталог: список моделей ===================== */
+
     private void showModelsList(long chatId) throws Exception {
         int used = orders.countNonFailed();
         if (used >= cfg.dropLimit()) {
             sendText(chatId, "❌ Предзаказ закрыт: лимит дропа (" + cfg.dropLimit() + " пар) достигнут.");
             return;
         }
-
         List<Product> list = products.listActive();
         if (list.isEmpty()) {
             sendText(chatId, "Каталог пуст. Обратитесь к администратору.");
@@ -111,49 +110,58 @@ public class WinrunBot extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         List<InlineKeyboardButton> row = new ArrayList<>();
         for (Product p : list) {
-            InlineKeyboardButton b = new InlineKeyboardButton();
-            b.setText(p.name);
+            InlineKeyboardButton b = new InlineKeyboardButton(p.name);
             b.setCallbackData("model:" + p.id);
             row.add(b);
             if (row.size() == 2) { rows.add(new ArrayList<>(row)); row.clear(); }
         }
         if (!row.isEmpty()) rows.add(row);
 
-        InlineKeyboardMarkup kb = inline(rows);
         SendMessage sm = new SendMessage(String.valueOf(chatId), "Выберите модель:");
-        sm.setReplyMarkup(kb);
+        sm.setReplyMarkup(inline(rows));
         execute(sm);
-
-        // Сброс состояния карточки
-        Session s = sessions.computeIfAbsent(chatId, k -> new Session());
-        s.lastCardMessageId = null;
-        s.lastCardIsPhoto = null;
 
         states.put(chatId, ConversationState.SELECT_PRODUCT);
     }
 
-    /* ==================== КАРТОЧКА МОДЕЛИ: ПОКАЗ/РЕДАКТИРОВАНИЕ ==================== */
+    /* ===================== Помощники по фото ===================== */
 
-    private static final class MediaRef {
-        final InputFile file;   // null, если картинки нет
-        final boolean isUrl;    // true = http/https, false = локальный файл
-        MediaRef(InputFile file, boolean isUrl) { this.file = file; this.isUrl = isUrl; }
+    private String imagesBasePathSafe() {
+        try {
+            var m = Config.class.getMethod("imagesBasePath");
+            Object v = m.invoke(cfg);
+            if (v != null) return v.toString();
+        } catch (Exception ignore) {}
+        return "."; // текущая директория запуска
     }
 
-    private MediaRef resolveInputFile(String ref) {
-        if (ref == null || ref.isBlank()) return new MediaRef(null, false);
-        String r = ref.trim();
-        if (r.startsWith("http://") || r.startsWith("https://")) {
-            return new MediaRef(new InputFile(r), true);
-        }
-        // локальный путь
-        File f = new File(r);
-        if (!f.isAbsolute()) f = new File(cfg.imagesBasePath(), r);
-        if (f.exists() && f.isFile()) {
-            return new MediaRef(new InputFile(f, f.getName()), false);
-        }
-        System.out.println("[IMG] Not found: " + f.getAbsolutePath());
-        return new MediaRef(null, false);
+    private boolean isHttpUrl(String ref) {
+        return ref != null && (ref.startsWith("http://") || ref.startsWith("https://"));
+    }
+
+    private File resolveLocalFile(String ref) {
+        File f = new File(ref);
+        if (!f.isAbsolute()) f = new File(imagesBasePathSafe(), ref);
+        return f;
+    }
+
+    /** Новый порядок: base.jpg, base_4.jpg, base_3.jpg, base_5.jpg, base_2.jpg */
+    private List<String> buildStrictRefs(String mainFilename) {
+        List<String> out = new ArrayList<>();
+        if (mainFilename == null || mainFilename.isBlank()) return out;
+
+        String name = mainFilename.trim();
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String ext  = dot > 0 ? name.substring(dot) : "";
+
+        // порядок для всех моделей/вариантов: 1, 4, 3, 5, 2
+        out.add(base + ext);          // 1: base.jpg (например flow1.jpg)
+        out.add(base + "_4" + ext);   // 2
+        out.add(base + "_3" + ext);   // 3
+        out.add(base + "_5" + ext);   // 4
+        out.add(base + "_2" + ext);   // 5
+        return out;
     }
 
     private String buildCaption(Product p, Product.Variant v) {
@@ -163,24 +171,102 @@ public class WinrunBot extends TelegramLongPollingBot {
                 "Цена: " + (p.price > 0 ? p.price : cfg.priceRub()) + " ₽";
     }
 
-    private InlineKeyboardMarkup colorNavKb(Product p) {
-        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        if (p.variants != null && p.variants.size() > 1) {
-            InlineKeyboardButton prev = new InlineKeyboardButton("◀");
-            prev.setCallbackData("vprev");
-            InlineKeyboardButton label = new InlineKeyboardButton("Сменить цвет");
-            label.setCallbackData("noop"); // некликабельно по смыслу — мы проигнорируем "noop"
-            InlineKeyboardButton next = new InlineKeyboardButton("▶");
-            next.setCallbackData("vnext");
-            rows.add(List.of(prev, label, next));
+    /** Загрузить фото (если локальное) и закэшировать file_id. Вернёт список file_id по refs (только найденные). */
+    private List<String> ensureFileIds(long chatId, List<String> refs) throws TelegramApiException {
+        List<String> out = new ArrayList<>();
+        for (String ref : refs) {
+            if (ref == null || ref.isBlank()) continue;
+
+            String key = canonicalRef(ref);
+            String cached = fileIdCache.get(key);
+            if (cached != null && !cached.isBlank()) {
+                out.add(cached);
+                continue;
+            }
+
+            // Если это URL, можно сразу использовать его как media, НО для единообразия и надёжности тоже прогрузим в file_id.
+            InputFile toSend;
+            if (isHttpUrl(ref)) {
+                toSend = new InputFile(ref);
+            } else {
+                File f = resolveLocalFile(ref);
+                if (!f.exists() || !f.isFile()) {
+                    System.out.println("[IMG] Not found: " + f.getAbsolutePath());
+                    continue;
+                }
+                toSend = new InputFile(f, f.getName());
+            }
+
+            // Временная отправка, чтобы получить file_id
+            SendPhoto sp = new SendPhoto(String.valueOf(chatId), toSend);
+            Message msg = execute(sp);
+            String fid = extractLargestPhotoFileId(msg);
+            if (fid != null) {
+                fileIdCache.put(key, fid);
+                out.add(fid);
+            }
+
+            // Удалим временный месседж
+            try { execute(new DeleteMessage(String.valueOf(chatId), msg.getMessageId())); } catch (Exception ignore) {}
         }
-        InlineKeyboardButton pick = new InlineKeyboardButton("Выбрать ✅");
-        pick.setCallbackData("pickModel");
-        rows.add(List.of(pick));
+        return out;
+    }
+
+    private String canonicalRef(String ref) {
+        if (ref == null) return "";
+        String r = ref.trim();
+        if (isHttpUrl(r)) return r;
+        // для локальных — абсолютный путь как ключ
+        File f = resolveLocalFile(r);
+        return f.getAbsolutePath();
+    }
+
+    private String extractLargestPhotoFileId(Message msg) {
+        if (msg == null || msg.getPhoto() == null || msg.getPhoto().isEmpty()) return null;
+        PhotoSize best = null;
+        for (PhotoSize ps : msg.getPhoto()) {
+            if (best == null) best = ps;
+            else {
+                Integer bs = best.getFileSize(), cs = ps.getFileSize();
+                if (bs == null || (cs != null && cs > bs)) best = ps;
+            }
+        }
+        return best != null ? best.getFileId() : null;
+    }
+
+    private InlineKeyboardMarkup controlKb() {
+        List<List<InlineKeyboardButton>> rows = new ArrayList<>();
+
+        // навигация по цветам
+        rows.add(List.of(
+                button("◀", "vprev"),
+                button("🔁 Цвета", "noop"),
+                button("▶", "vnext")
+        ));
+
+        // действие: выбрать текущую
+        rows.add(List.of(
+                button("Выбрать ✅", "pickModel")
+        ));
+
+        // новые кнопки
+        rows.add(List.of(
+                button("🔁 Модели", "chooseModel"),
+                button("🏠 Меню", "goMenu")
+        ));
+
         return inline(rows);
     }
 
-    private void sendModelCard(long chatId) throws Exception {
+    private InlineKeyboardButton button(String text, String data) {
+        InlineKeyboardButton b = new InlineKeyboardButton(text);
+        b.setCallbackData(data);
+        return b;
+    }
+
+    /* ===================== Альбом + карточка ===================== */
+
+    private void sendVariantAlbumThenCard(long chatId) throws Exception {
         Session s = sessions.computeIfAbsent(chatId, k -> new Session());
         if (s.selectedModelId == null) { showModelsList(chatId); return; }
         var opt = products.find(s.selectedModelId);
@@ -195,139 +281,64 @@ public class WinrunBot extends TelegramLongPollingBot {
         if (idx < 0 || idx >= p.variants.size()) idx = 0;
         Product.Variant v = p.variants.get(idx);
 
-        String caption = buildCaption(p, v);
-        InlineKeyboardMarkup kb = colorNavKb(p);
+        // Имена файлов по схеме base.jpg, base_2.jpg ... base_5.jpg
+        List<String> refs = buildStrictRefs(v.image);
 
-        MediaRef mr = resolveInputFile(v.image);
-        Message msg;
-        if (mr.file != null) {
-            SendPhoto sp = new SendPhoto(String.valueOf(chatId), mr.file);
-            sp.setCaption(caption);
-            sp.setParseMode(ParseMode.MARKDOWN);
-            sp.setReplyMarkup(kb);
-            msg = execute(sp);
-            s.lastCardIsPhoto = true;
+        // Гарантируем file_id для каждого доступного изображения
+        List<String> fids = ensureFileIds(chatId, refs);
 
-            // заодно сохраним file_id фото для дальнейшего редактирования
-            String fid = extractLargestPhotoFileId(msg);
-            if (fid != null) cacheFileId(p.id, idx, fid);
-        } else {
-            SendMessage sm = new SendMessage(String.valueOf(chatId), caption + (v.image!=null && !v.image.isBlank()? "\n(изображение: " + v.image + ")" : ""));
-            sm.setParseMode(ParseMode.MARKDOWN);
-            sm.setReplyMarkup(kb);
-            msg = execute(sm);
-            s.lastCardIsPhoto = false;
+        // Формируем альбом из file_id (строки). Telegram требует >= 2 для SendMediaGroup
+        List<InputMedia> media = new ArrayList<>();
+        for (String fid : fids) {
+            InputMediaPhoto photo = new InputMediaPhoto();
+            photo.setMedia(fid); // <-- ВАЖНО: строка (file_id)
+            media.add(photo);
+            if (media.size() == 5) break;
         }
-        s.lastCardMessageId = msg.getMessageId();
+
+        List<Integer> mids = new ArrayList<>();
+
+        if (media.size() >= 2) {
+            SendMediaGroup group = new SendMediaGroup();
+            group.setChatId(String.valueOf(chatId));
+            group.setMedias(media);
+            List<Message> responses = execute(group);
+            for (Message mm : responses) mids.add(mm.getMessageId());
+        } else if (media.size() == 1) {
+            // fallback: одно фото отдельно
+            SendPhoto sp = new SendPhoto(String.valueOf(chatId), new InputFile(fids.get(0)));
+            Message m = execute(sp);
+            mids.add(m.getMessageId());
+        } else {
+            // нет валидных изображений
+        }
+
+        lastAlbumMessageIds.put(chatId, mids);
+
+        // Затем карточка (название/описание/цена + кнопки)
+        String caption = buildCaption(p, v);
+        SendMessage card = new SendMessage(String.valueOf(chatId), caption);
+        card.setParseMode(ParseMode.MARKDOWN);
+        card.setReplyMarkup(controlKb());
+        Message cardMsg = execute(card);
+        lastCardMessageId.put(chatId, cardMsg.getMessageId());
     }
 
-    private void editModelCard(long chatId) throws Exception {
-        Session s = sessions.computeIfAbsent(chatId, k -> new Session());
-        if (s.selectedModelId == null || s.lastCardMessageId == null) { sendModelCard(chatId); return; }
-
-        var opt = products.find(s.selectedModelId);
-        if (opt.isEmpty()) { showModelsList(chatId); return; }
-        Product p = opt.get();
-        if (p.variants == null || p.variants.isEmpty()) { showModelsList(chatId); return; }
-
-        int idx = (s.variantIndex == null) ? 0 : s.variantIndex;
-        if (idx < 0 || idx >= p.variants.size()) idx = 0;
-        Product.Variant v = p.variants.get(idx);
-
-        String caption = buildCaption(p, v);
-        InlineKeyboardMarkup kb = colorNavKb(p);
-
-        // 1) если уже знаем file_id целевой картинки — редактируем по file_id
-        String knownFileId = getCachedFileId(p.id, idx);
-        if (knownFileId != null) {
-            try {
-                InputMediaPhoto photo = new InputMediaPhoto();
-                photo.setMedia(knownFileId); // file_id
-                photo.setCaption(caption);
-                photo.setParseMode(ParseMode.MARKDOWN);
-
-                EditMessageMedia edit = new EditMessageMedia();
-                edit.setChatId(String.valueOf(chatId));
-                edit.setMessageId(s.lastCardMessageId);
-                edit.setMedia(photo);
-                edit.setReplyMarkup(kb);
-                execute(edit);
-                s.lastCardIsPhoto = true;
-                return;
-            } catch (TelegramApiException e) {
-                System.out.println("Edit by file_id failed: " + e.getMessage());
-            }
-        }
-
-        // 2) если есть публичный URL — редактируем URL
-        MediaRef mr = resolveInputFile(v.image);
-        if (mr.file != null && mr.isUrl) {
-            try {
-                InputMediaPhoto photo = new InputMediaPhoto();
-                photo.setMedia(String.valueOf(mr.file)); // URL
-                photo.setCaption(caption);
-                photo.setParseMode(ParseMode.MARKDOWN);
-
-                EditMessageMedia edit = new EditMessageMedia();
-                edit.setChatId(String.valueOf(chatId));
-                edit.setMessageId(s.lastCardMessageId);
-                edit.setMedia(photo);
-                edit.setReplyMarkup(kb);
-                execute(edit);
-                s.lastCardIsPhoto = true;
-                return;
-            } catch (TelegramApiException e) {
-                System.out.println("Edit by URL failed: " + e.getMessage());
-            }
-        }
-
-        // 3) локальный файл или картинка недоступна — fallback: один раз переотправим,
-        // сохраним file_id, дальше будем редактировать по file_id без удаления
-        if (mr.file != null && !mr.isUrl) {
-            deleteSilently(chatId, s.lastCardMessageId);
-            s.lastCardMessageId = null;
-
-            SendPhoto sp = new SendPhoto(String.valueOf(chatId), mr.file);
-            sp.setCaption(caption);
-            sp.setParseMode(ParseMode.MARKDOWN);
-            sp.setReplyMarkup(kb);
-            Message msg = execute(sp);
-            s.lastCardIsPhoto = true;
-            s.lastCardMessageId = msg.getMessageId();
-
-            String fid = extractLargestPhotoFileId(msg);
-            if (fid != null) cacheFileId(p.id, idx, fid);
-            return;
-        }
-
-        // 4) картинки нет — редактируем подпись/текст
-        if (Boolean.TRUE.equals(s.lastCardIsPhoto)) {
-            EditMessageCaption ec = new EditMessageCaption();
-            ec.setChatId(String.valueOf(chatId));
-            ec.setMessageId(s.lastCardMessageId);
-            ec.setCaption(caption);
-            ec.setParseMode(ParseMode.MARKDOWN);
-            ec.setReplyMarkup(kb);
-            execute(ec);
-        } else {
-            EditMessageText et = new EditMessageText();
-            et.setChatId(String.valueOf(chatId));
-            et.setMessageId(s.lastCardMessageId);
-            et.setText(caption + (v.image!=null && !v.image.isBlank()? "\n(изображение: " + v.image + ")" : ""));
-            et.setParseMode(ParseMode.MARKDOWN);
-            et.setReplyMarkup(kb);
-            execute(et);
-        }
-    }
-
-    /* ==================== CALLBACKS ==================== */
+    /* ===================== Callbacks ===================== */
 
     private void onCallback(CallbackQuery q) throws Exception {
         long chatId = q.getMessage().getChatId();
         String data = q.getData();
 
-        if ("noop".equals(data)) {
-            // Ничего не делаем: это просто "лейбл" в середине
+        if ("noop".equals(data)) return;
+
+        if ("chooseModel".equals(data)) {
+            showModelsList(chatId);
+            return;
+        }
+
+        if ("goMenu".equals(data)) {
+            sendMainMenu(chatId);
             return;
         }
 
@@ -336,9 +347,8 @@ public class WinrunBot extends TelegramLongPollingBot {
             Session s = sessions.computeIfAbsent(chatId, k -> new Session());
             s.selectedModelId = id;
             s.variantIndex = 0;
-            s.lastCardMessageId = null;
-            s.lastCardIsPhoto = null;
-            sendModelCard(chatId);
+
+            sendVariantAlbumThenCard(chatId);
             return;
         }
 
@@ -352,11 +362,10 @@ public class WinrunBot extends TelegramLongPollingBot {
             if (n == 0) { showModelsList(chatId); return; }
 
             int idx = (s.variantIndex == null) ? 0 : s.variantIndex;
-            if ("vnext".equals(data)) idx = (idx + 1) % n;
-            else idx = (idx - 1 + n) % n;
+            if ("vnext".equals(data)) idx = (idx + 1) % n; else idx = (idx - 1 + n) % n;
             s.variantIndex = idx;
 
-            editModelCard(chatId);
+            sendVariantAlbumThenCard(chatId);
             return;
         }
 
@@ -371,7 +380,7 @@ public class WinrunBot extends TelegramLongPollingBot {
             if (p.variants == null || p.variants.isEmpty()) { showModelsList(chatId); return; }
             if (idx < 0 || idx >= p.variants.size()) idx = 0;
 
-            s.selectedProductId = p.id;                 // для заказа используем id модели
+            s.selectedProductId = p.id;
             s.selectedColor = p.variants.get(idx).color;
 
             // размеры
@@ -385,10 +394,8 @@ public class WinrunBot extends TelegramLongPollingBot {
                 b.setCallbackData("size:" + sz);
                 rows.add(List.of(b));
             }
-            InlineKeyboardMarkup kb = inline(rows);
-
             SendMessage msg = new SendMessage(String.valueOf(chatId), "Выберите размер:");
-            msg.setReplyMarkup(kb);
+            msg.setReplyMarkup(inline(rows));
             execute(msg);
 
             states.put(chatId, ConversationState.SELECT_SIZE);
@@ -421,7 +428,7 @@ public class WinrunBot extends TelegramLongPollingBot {
         }
     }
 
-    /* ==================== ФЛОУ ОФОРМЛЕНИЯ ==================== */
+    /* ===================== Оформление ===================== */
 
     private void proceedFlow(long chatId, String text) throws Exception {
         ConversationState st = states.getOrDefault(chatId, ConversationState.IDLE);
@@ -441,14 +448,11 @@ public class WinrunBot extends TelegramLongPollingBot {
                 }
                 s.phone = text.trim();
 
-                InlineKeyboardButton b1 = new InlineKeyboardButton("СДЭК");
-                b1.setCallbackData("del:SDEK");
-                InlineKeyboardButton b2 = new InlineKeyboardButton("Яндекс.Доставка");
-                b2.setCallbackData("del:YANDEX");
+                InlineKeyboardButton b1 = new InlineKeyboardButton("СДЭК"); b1.setCallbackData("del:SDEK");
+                InlineKeyboardButton b2 = new InlineKeyboardButton("Яндекс.Доставка"); b2.setCallbackData("del:YANDEX");
 
-                InlineKeyboardMarkup kb = inline(List.of(List.of(b1), List.of(b2)));
                 SendMessage sm = new SendMessage(chatIdStr, "Выберите способ доставки:");
-                sm.setReplyMarkup(kb);
+                sm.setReplyMarkup(inline(List.of(List.of(b1), List.of(b2))));
                 execute(sm);
 
                 states.put(chatId, ConversationState.CHOOSE_DELIVERY);
@@ -486,22 +490,16 @@ public class WinrunBot extends TelegramLongPollingBot {
                         • Адрес/ПВЗ: %s
                         Цена к оплате: %d ₽
                         """.formatted(
-                        p.name,
-                        s.selectedColor,
-                        s.selectedSize,
-                        s.fio,
-                        s.phone,
-                        s.deliveryType,
+                        p.name, s.selectedColor, s.selectedSize, s.fio, s.phone, s.deliveryType,
                         s.address == null ? "—" : s.address + (s.pvz == null ? "" : "; ПВЗ: " + s.pvz),
                         p.price > 0 ? p.price : cfg.priceRub()
                 );
 
                 InlineKeyboardButton ok = new InlineKeyboardButton("Оформить предзаказ ✅");
                 ok.setCallbackData("order:confirm");
-                InlineKeyboardMarkup kb = inline(List.of(List.of(ok)));
 
                 SendMessage reviewMsg = new SendMessage(chatIdStr, review);
-                reviewMsg.setReplyMarkup(kb);
+                reviewMsg.setReplyMarkup(inline(List.of(List.of(ok))));
                 execute(reviewMsg);
 
                 states.put(chatId, ConversationState.REVIEW);
@@ -551,14 +549,12 @@ public class WinrunBot extends TelegramLongPollingBot {
         s.draftOrderId = id;
     }
 
-    /* Публичный метод — дергает WebServer после успешной оплаты */
+    /* ===================== Служебные ===================== */
+
     public void notifyPaymentReceived(long chatId, long orderId) {
         try {
-            sendText(chatId,
-                    "✅ Оплата получена! Заказ №" + orderId +
-                            " принят. Статус обновится в разделе «Мои заказы». " +
-                            "Спасибо, что стали частью первого дропа Winrun 👟"
-            );
+            sendText(chatId, "✅ Оплата получена! Заказ №" + orderId +
+                    " принят. Статус обновится в разделе «Мои заказы». Спасибо, что стали частью первого дропа Winrun 👟");
         } catch (Exception ignore) { }
     }
 
@@ -584,8 +580,6 @@ public class WinrunBot extends TelegramLongPollingBot {
         sendText(chatId, sb.toString());
     }
 
-    /* ==================== УТИЛИТЫ ==================== */
-
     private InlineKeyboardMarkup inline(List<List<InlineKeyboardButton>> rows) {
         InlineKeyboardMarkup kb = new InlineKeyboardMarkup();
         kb.setKeyboard(rows);
@@ -596,12 +590,6 @@ public class WinrunBot extends TelegramLongPollingBot {
         SendMessage sm = new SendMessage(String.valueOf(chatId), text);
         sm.setReplyMarkup(mainMenu());
         execute(sm);
-    }
-
-    private void deleteSilently(long chatId, Integer messageId) {
-        if (messageId == null) return;
-        try { execute(new DeleteMessage(String.valueOf(chatId), messageId)); }
-        catch (Exception ignore) {}
     }
 
     private ReplyKeyboard mainMenu() {
@@ -631,25 +619,6 @@ public class WinrunBot extends TelegramLongPollingBot {
         execute(sm);
 
         states.put(chatId, ConversationState.IDLE);
-        Session s = new Session();
-        sessions.put(chatId, s);
-    }
-
-    private void cacheFileId(int productId, int variantIndex, String fileId) {
-        photoFileIdCache.computeIfAbsent(productId, k -> new ConcurrentHashMap<>()).put(variantIndex, fileId);
-    }
-    private String getCachedFileId(int productId, int variantIndex) {
-        Map<Integer, String> m = photoFileIdCache.get(productId);
-        return m == null ? null : m.get(variantIndex);
-    }
-    private String extractLargestPhotoFileId(Message msg) {
-        if (msg == null || msg.getPhoto() == null || msg.getPhoto().isEmpty()) return null;
-        PhotoSize best = null;
-        for (PhotoSize ps : msg.getPhoto()) {
-            if (best == null || (ps.getFileSize() != null && best.getFileSize() != null && ps.getFileSize() > best.getFileSize())) {
-                best = ps;
-            }
-        }
-        return best != null ? best.getFileId() : null;
+        sessions.put(chatId, new Session());
     }
 }

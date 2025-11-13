@@ -128,7 +128,7 @@ public class ProductRepo {
         [
           {
             "id": 1001,
-            "name": "Winrun Axis (кеды)",
+            "name": "Winrun Axis",
             "description": "Кеды с точкой равновесия — строгие линии и универсальность. Axis держит баланс между спортивной динамикой и кэжуальной простотой.",
             "price": 8990,
             "variants": [
@@ -140,7 +140,7 @@ public class ProductRepo {
           },
           {
             "id": 1002,
-            "name": "Winrun Urban Classic (кеды)",
+            "name": "Winrun Urban",
             "description": "Лаконичные кеды на каждый день. Urban Classic — сдержанная эстетика и комфорт. Чистая форма легко «садится» к джинсам, брюкам и шортам.",
             "price": 8990,
             "variants": [
@@ -152,7 +152,7 @@ public class ProductRepo {
           },
           {
             "id": 1003,
-            "name": "WINRUN Flow",
+            "name": "Winrun Flow",
             "description": "Мужские кроссовки для активного дня: гибкая посадка, плавный перекат и уверенное сцепление — от офиса до прогулок.",
             "price": 8990,
             "variants": [
