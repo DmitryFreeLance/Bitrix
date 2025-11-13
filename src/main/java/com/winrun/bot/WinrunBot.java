@@ -98,9 +98,7 @@ public class WinrunBot extends TelegramLongPollingBot {
     private InlineKeyboardMarkup startInlineKb() {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(List.of(button("📄 Юр. информация", "legal")));
-        rows.add(List.of(button("🚚 Способы доставки", "delivery")));
         rows.add(List.of(button("📜 Оферта", "offer")));
-        rows.add(List.of(button("🏠 В меню", "goMenu")));
         return inline(rows);
     }
 
@@ -396,11 +394,6 @@ public class WinrunBot extends TelegramLongPollingBot {
             return;
         }
 
-        if ("delivery".equals(data)) {
-            sendText(chatId, "Способы доставки: СДЭК и Яндекс.Доставка.");
-            return;
-        }
-
         if ("offer".equals(data)) {
             File f = resolveLocalFile("1.docx");
             if (f.exists() && f.isFile()) {
@@ -414,7 +407,6 @@ public class WinrunBot extends TelegramLongPollingBot {
         }
 
         if ("goMenu".equals(data)) {
-            // Возврат в меню (ничего не удаляем — по твоему требованию)
             sendMainMenu(chatId);
             return;
         }

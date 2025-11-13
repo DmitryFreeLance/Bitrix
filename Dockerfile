@@ -13,7 +13,7 @@ WORKDIR /app
 # app
 COPY --from=build /app/target/*.jar /app/app.jar
 
-COPY 1.jpg 1.docx /app/
+COPY 1.jpg 1.docx /app/images/
 COPY images/ /app/images/
 
 EXPOSE 8080
